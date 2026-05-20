@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { generateTalkingHead } from "@/lib/salad";
 
 export const runtime = "nodejs";
-export const maxDuration = 600; // 10 min — EchoMimic V2 leva ~8–15 min para 15s
+export const maxDuration = 300; // 5 min — max no Hobby plan
 
 export async function POST(req: NextRequest) {
   try {
