@@ -1,8 +1,25 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
-type Step = "idle" | "loading" | "done" | "error";
+type Step = "idle" | "submitting" | "polling" | "done" | "error";
+
+async function compressImage(file: File, maxSize = 512): Promise<Blob> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      const ratio = Math.min(maxSize / img.width, maxSize / img.height, 1);
+      canvas.width = Math.round(img.width * ratio);
+      canvas.height = Math.round(img.height * ratio);
+      canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob((b) => resolve(b!), "image/jpeg", 0.85);
+    };
+    img.src = url;
+  });
+}
 
 export default function Home() {
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -12,12 +29,16 @@ export default function Home() {
   const [duration, setDuration] = useState(15);
   const [step, setStep] = useState<Step>("idle");
   const [progress, setProgress] = useState("");
+  const [elapsed, setElapsed] = useState(0);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [meta, setMeta] = useState<{ frames: number; seed: number } | null>(null);
+  const [meta, setMeta] = useState<{ frames: number; seed: number; duration_seconds: number } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
 
   const imgRef = useRef<HTMLInputElement>(null);
   const audRef = useRef<HTMLInputElement>(null);
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startTimeRef = useRef<number>(0);
 
   function pickImage(f: File | null) {
     setImageFile(f);
@@ -37,47 +58,113 @@ export default function Home() {
     setVideoUrl(null);
   }
 
+  const pollStatus = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`/api/status/${id}`);
+      const text = await res.text();
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        setStep("error");
+        setErrorMsg(`Resposta inválida: ${text.slice(0, 200)}`);
+        return;
+      }
+
+      if (!res.ok) {
+        setStep("error");
+        setErrorMsg(String(data.error ?? `HTTP ${res.status}`));
+        return;
+      }
+
+      const status = data.status as string;
+      const prog = (data.progress as string) || "";
+      const secs = Math.round((Date.now() - startTimeRef.current) / 1000);
+      setElapsed(secs);
+
+      if (status === "done") {
+        const b64 = data.video as string;
+        setVideoUrl(`data:video/mp4;base64,${b64}`);
+        setMeta({
+          frames: data.frames as number,
+          seed: data.seed as number,
+          duration_seconds: data.duration_seconds as number,
+        });
+        setProgress(`Concluído em ${secs}s`);
+        setStep("done");
+      } else if (status === "error") {
+        setStep("error");
+        setErrorMsg(String(data.error ?? "Erro desconhecido no servidor"));
+      } else {
+        setProgress(prog || `Processando... ${secs}s`);
+        pollRef.current = setTimeout(() => pollStatus(id), 10000);
+      }
+    } catch (e) {
+      setStep("error");
+      setErrorMsg(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearTimeout(pollRef.current);
+    };
+  }, []);
+
   async function generate() {
     if (!imageFile || !audioFile) {
       setErrorMsg("Sobe a foto e o áudio antes de gerar.");
       return;
     }
-    setStep("loading");
-    setProgress("Enviando para o servidor...");
+    if (pollRef.current) clearTimeout(pollRef.current);
+
+    setStep("submitting");
+    setProgress("Comprimindo imagem...");
     setVideoUrl(null);
     setErrorMsg(null);
     setMeta(null);
+    setJobId(null);
+    setElapsed(0);
+
+    let imgBlob: Blob;
+    try {
+      imgBlob = await compressImage(imageFile);
+    } catch {
+      imgBlob = imageFile;
+    }
+
+    setProgress("Enviando para o servidor...");
 
     const fd = new FormData();
-    fd.append("image", imageFile);
+    fd.append("image", imgBlob, "portrait.jpg");
     fd.append("audio", audioFile);
     fd.append("duration", String(duration));
 
-    const timer = setInterval(() => {
-      setProgress((p) => {
-        const mins = p.match(/(\d+) min/);
-        const n = mins ? Number(mins[1]) + 1 : 1;
-        return `Gerando vídeo... ${n} min (EchoMimic V2 leva 8–15 min para 15s)`;
-      });
-    }, 60000);
-
-    setTimeout(() => setProgress("Gerando vídeo... pode levar 8–15 min"), 2000);
-
     try {
       const res = await fetch("/api/generate", { method: "POST", body: fd });
-      clearInterval(timer);
-      const data = await res.json();
-      if (!res.ok) {
+      const text = await res.text();
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(text);
+      } catch {
         setStep("error");
-        setErrorMsg(data.error ?? "Erro desconhecido");
+        setErrorMsg(`Erro do servidor: ${text.slice(0, 200)}`);
         return;
       }
-      setVideoUrl(data.video);
-      setMeta({ frames: data.frames, seed: data.seed });
-      setStep("done");
-      setProgress(`Vídeo gerado! ${data.frames} frames, seed ${data.seed}`);
+
+      if (!res.ok) {
+        setStep("error");
+        setErrorMsg(String(data.error ?? `HTTP ${res.status}`));
+        return;
+      }
+
+      const id = data.job_id as string;
+      setJobId(id);
+      setStep("polling");
+      setProgress("Job enviado! Aguardando processamento...");
+      startTimeRef.current = Date.now();
+      pollRef.current = setTimeout(() => pollStatus(id), 5000);
     } catch (e) {
-      clearInterval(timer);
       setStep("error");
       setErrorMsg(String(e));
     }
@@ -91,7 +178,12 @@ export default function Home() {
     a.click();
   }
 
-  const canGenerate = !!imageFile && !!audioFile && step !== "loading";
+  const isLoading = step === "submitting" || step === "polling";
+  const canGenerate = !!imageFile && !!audioFile && !isLoading;
+
+  const progressPct = step === "polling"
+    ? Math.min(95, (elapsed / (duration * 50)) * 100)
+    : step === "done" ? 100 : 0;
 
   return (
     <main className="max-w-2xl mx-auto px-4 py-8">
@@ -120,7 +212,7 @@ export default function Home() {
             <div className="text-slate-400 py-8">
               <div className="text-4xl mb-2">📷</div>
               Clique para escolher uma foto
-              <div className="text-xs mt-1">JPG ou PNG · rosto frontal · até 10MB</div>
+              <div className="text-xs mt-1">JPG ou PNG · rosto frontal · redimensionado para 512px</div>
             </div>
           )}
           <input
@@ -191,17 +283,38 @@ export default function Home() {
         disabled={!canGenerate}
         className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-4 rounded-xl font-semibold text-lg disabled:opacity-40 transition active:scale-[0.99]"
       >
-        {step === "loading" ? "⏳ Gerando..." : "🎬 Gerar vídeo"}
+        {isLoading ? "⏳ Gerando..." : "🎬 Gerar vídeo"}
       </button>
+
+      {/* Progress bar */}
+      {isLoading && (
+        <div className="mt-4">
+          <div className="w-full bg-slate-100 rounded-full h-2">
+            <div
+              className="bg-indigo-500 h-2 rounded-full transition-all duration-1000"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Status */}
       {(progress || errorMsg) && (
-        <div className="mt-4 text-sm text-center px-2">
+        <div className="mt-3 text-sm text-center px-2">
           {step === "error" ? (
             <span className="text-red-600">{errorMsg}</span>
           ) : (
-            <span className="text-slate-600">{progress}</span>
+            <span className="text-slate-600">
+              {progress}
+              {step === "polling" && elapsed > 0 && ` · ${elapsed}s`}
+            </span>
           )}
+        </div>
+      )}
+
+      {jobId && step === "polling" && (
+        <div className="mt-1 text-center text-xs text-slate-400">
+          Job ID: {jobId} · verificando a cada 10s
         </div>
       )}
 
@@ -218,7 +331,7 @@ export default function Home() {
           />
           {meta && (
             <p className="text-xs text-slate-400 mt-2 text-center">
-              {meta.frames} frames · seed {meta.seed}
+              {meta.frames} frames · {meta.duration_seconds.toFixed(1)}s · seed {meta.seed}
             </p>
           )}
           <button

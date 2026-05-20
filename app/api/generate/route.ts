@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateTalkingHead } from "@/lib/salad";
+import { startGeneration } from "@/lib/salad";
 
 export const runtime = "nodejs";
-export const maxDuration = 300; // 5 min — max no Hobby plan
+export const maxDuration = 30; // just submits the job, fast
 
 export async function POST(req: NextRequest) {
   try {
@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "duração deve ser 1–30s" }, { status: 400 });
     }
 
-    const result = await generateTalkingHead({
+    const jobId = await startGeneration({
       imageFile: image,
       audioFile: audio,
       durationSeconds: duration,
@@ -45,12 +45,7 @@ export async function POST(req: NextRequest) {
       height,
     });
 
-    return NextResponse.json({
-      video: result.videoDataUrl,
-      duration: result.durationSeconds,
-      frames: result.frames,
-      seed: result.seed,
-    });
+    return NextResponse.json({ job_id: jobId, status: "pending" });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: msg }, { status: 500 });

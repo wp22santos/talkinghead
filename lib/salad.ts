@@ -20,16 +20,20 @@ export interface TalkingHeadOpts {
   seed?: number;
 }
 
-export interface TalkingHeadResult {
-  videoDataUrl: string;       // data:video/mp4;base64,...
-  durationSeconds: number;
-  frames: number;
-  seed: number;
+export interface JobStatus {
+  job_id: string;
+  status: "pending" | "running" | "done" | "error";
+  progress: string;
+  video?: string;       // base64 mp4, only when done
+  frames?: number;
+  fps?: number;
+  duration_seconds?: number;
+  seed?: number;
+  error?: string;
 }
 
-export async function generateTalkingHead(
-  opts: TalkingHeadOpts,
-): Promise<TalkingHeadResult> {
+/** Start async job — returns job_id immediately */
+export async function startGeneration(opts: TalkingHeadOpts): Promise<string> {
   if (!BASE_URL) throw new Error("TALKINGHEAD_ENDPOINT_URL não configurada");
 
   const fd = new FormData();
@@ -54,19 +58,24 @@ export async function generateTalkingHead(
     throw new Error(`Salad /generate falhou: ${res.status} ${txt.slice(0, 300)}`);
   }
 
-  const json = (await res.json()) as {
-    video: string;
-    duration_seconds: number;
-    frames: number;
-    seed: number;
-  };
+  const json = (await res.json()) as { job_id: string };
+  return json.job_id;
+}
 
-  return {
-    videoDataUrl: `data:video/mp4;base64,${json.video}`,
-    durationSeconds: json.duration_seconds,
-    frames: json.frames,
-    seed: json.seed,
-  };
+/** Poll job status */
+export async function getJobStatus(jobId: string): Promise<JobStatus> {
+  if (!BASE_URL) throw new Error("TALKINGHEAD_ENDPOINT_URL não configurada");
+
+  const res = await fetch(`${BASE_URL}/status/${jobId}`, {
+    headers: headers(),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Salad /status falhou: ${res.status} ${txt.slice(0, 200)}`);
+  }
+
+  return res.json() as Promise<JobStatus>;
 }
 
 export async function checkHealth(): Promise<boolean> {
